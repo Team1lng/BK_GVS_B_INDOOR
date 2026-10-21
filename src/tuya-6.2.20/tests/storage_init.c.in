@@ -1,0 +1,45 @@
+#include <assert.h>
+#include <string.h>
+#include <unistd.h>
+#include "ty_sdk_common.h"
+#undef PR_DEBUG
+#define PR_DEBUG(...) ((void)0)
+#undef ENABLE_SHADOW_DEVICE
+#undef ENABLE_TUYA_CALL
+static char s_ipc_pid[64], s_ipc_uuid[64], s_ipc_authkey[64], s_ipc_storage[64], s_ipc_sd_path[128], s_app_version[64];
+static TUYA_IPC_SDK_RUN_VAR_S g_sdk_run_info;
+RING_BUFFER_USER_HANDLE_T s_ring_buffer_handles[E_IPC_STREAM_MAX];
+static int storage_result, storage_calls, ring_calls;
+#define tkl_wired_set_iface_name(...) ((void)0)
+#define TUYA_IPC_INIT_DP_CONFIG() ((void)0)
+#define tuya_set_lan_mode(...) ((void)0)
+#define tuya_get_lan_mode() 0
+#define __TUYA_IPC_SDK_START(...) OPRT_OK
+#define tuya_ipc_get_register_status() GW_BLE_ACTIVED
+#define tal_system_sleep(...) ((void)0)
+#define tuya_ipc_get_service_time(...) OPRT_OK
+#define TUYA_IPC_Get_MqttStatus() TRUE
+#define tuya_ipc_get_service_time_force(...) OPRT_OK
+#define TUYA_IPC_Media_Stream_Init(...) ((void)0)
+#define tuya_ipc_event_module_init(...) OPRT_OK
+#define TUYA_APP_Enable_Video_Msg(...) OPRT_OK
+#define TUYA_APP_Enable_CloudStorage(...) OPRT_OK
+#define TUYA_APP_Init_AI(...) OPRT_OK
+#define TUYA_IPC_upload_all_status() ((void)0)
+#define tuya_ipc_upload_skills() ((void)0)
+static int TUYA_APP_Init_Stream_Storage(TUYA_IPC_SDK_LOCAL_STORAGE_S *p) { ++storage_calls; return storage_result; }
+static RING_BUFFER_USER_HANDLE_T test_ring_open(void) { ++ring_calls; return (RING_BUFFER_USER_HANDLE_T)1; }
+#define tuya_ipc_ring_buffer_open(...) test_ring_open()
+/* SDK_MAIN */
+int main(void) {
+    tuya_init_config_t cfg = {0}; strcpy(cfg.cache_dir, "/tmp/");
+    g_sdk_run_info.local_storage_info.enable = true;
+    storage_result = -123;
+    assert(ty_sdk_main(&cfg) == -123);
+    assert(storage_calls == 1 && ring_calls == 0);
+    storage_result = 0;
+    assert(ty_sdk_main(&cfg) == 0);
+    assert(storage_calls == 2 && ring_calls == 3);
+    puts("PASS: real SDK main propagates local storage failure before exposing streams");
+    return 0;
+}

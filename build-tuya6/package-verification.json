@@ -1,0 +1,25 @@
+{
+  "package": "/home/leo/workspace/BK/APP/Indoor/tar_gz/GVS_B-Indoor/SAT_ANYKAOS_1017115146",
+  "sha256": "94972749cfbe1bf92373ec448ad62edec31fa8f4970319ab8844c7bcc5b456ce",
+  "verified_files": [
+    "app/hi3881_reload.sh",
+    "app/language.xls",
+    "app/rom.bin",
+    "app/sat_leo.ttf",
+    "app/onvif/rtsp_stream_url.xml",
+    "app/onvif/onvif_discover_devices.xml",
+    "app/onvif/device_infomation.xml",
+    "app/onvif/media_profile.xml",
+    "app/ANYKA37E.BIN",
+    "app/rings/1.mp3",
+    "app/rings/3.mp3",
+    "app/rings/touch.mp3",
+    "app/rings/2.mp3",
+    "app/rings/5.mp3",
+    "app/rings/4.mp3",
+    "platform/anyka_logo.rgb",
+    "platform/EVB_CBDM_AK3760E_V1.0.1.dtb",
+    "platform/update.sh",
+    "platform/upgrade_progress"
+  ]
+}

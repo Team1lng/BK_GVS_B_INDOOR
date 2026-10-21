@@ -1,0 +1,316 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include "ty_sdk_common.h"
+#include "codec/tuya_g711_utils.h"
+
+/* The ARM codec is unavailable on the host. These stubs implement its byte
+ * length contract, tagging samples so duplication and ordering are checked. */
+enum codec_fault { CODEC_OK, CODEC_ERROR, CODEC_ZERO, CODEC_SHORT, CODEC_ODD, CODEC_LONG };
+static enum codec_fault decode_fault, encode_fault;
+static bool monitoring, reject_queue;
+static unsigned int decode_calls, encode_calls, queue_calls;
+static unsigned char queued[32768];
+static size_t queued_size;
+
+bool tuya_monitor_state_get(void)
+{
+    return monitoring;
+}
+
+static unsigned int fault_length(enum codec_fault fault, unsigned int correct)
+{
+    switch (fault)
+    {
+    case CODEC_ZERO: return 0;
+    case CODEC_SHORT: return correct - 2;
+    case CODEC_ODD: return correct - 1;
+    case CODEC_LONG: return correct + 2;
+    default: return correct;
+    }
+}
+
+int tuya_g711_decode(unsigned char type, unsigned short *src, unsigned int src_len,
+                     unsigned char *dst, unsigned int *out_len)
+{
+    assert(type == TUYA_G711_MU_LAW || type == TUYA_G711_A_LAW);
+    assert(src != NULL && src_len != 0);
+    ++decode_calls;
+    if (decode_fault == CODEC_ERROR)
+    {
+        *out_len = 0;
+        return -1;
+    }
+    unsigned char *input = (unsigned char *)src;
+    short *pcm = (short *)dst;
+    for (unsigned int i = 0; i < src_len; ++i)
+        pcm[i] = (short)(input[i] * 17 - 2048);
+    *out_len = fault_length(decode_fault, src_len * 2);
+    return 0;
+}
+
+int tuya_g711_encode(unsigned char type, unsigned short *src, unsigned int src_len,
+                     unsigned char *dst, unsigned int *out_len)
+{
+    assert(type == TUYA_G711_A_LAW);
+    assert(src != NULL && src_len != 0 && src_len % 2 == 0);
+    ++encode_calls;
+    if (encode_fault == CODEC_ERROR)
+    {
+        *out_len = 0;
+        return -1;
+    }
+    short *pcm = (short *)src;
+    for (unsigned int i = 0; i < src_len / 2; ++i)
+    {
+        assert((pcm[i] + 2048) % 17 == 0);
+        dst[i] = (unsigned char)(((pcm[i] + 2048) / 17) ^ 0x55);
+    }
+    *out_len = fault_length(encode_fault, src_len / 2);
+    return 0;
+}
+
+bool network_audio_send_package_push(char type, const char *data, int len, bool ring_back)
+{
+    assert(type == 0 && !ring_back);
+    assert(data != NULL && len > 0 && len <= 1280);
+    ++queue_calls;
+    if (reject_queue)
+        return false;
+    assert(queued_size + len <= sizeof(queued));
+    memcpy(queued + queued_size, data, len);
+    queued_size += len;
+    return true;
+}
+
+/* SDK_AUDIO_RECEIVE */
+
+static unsigned char input_byte(unsigned int i, unsigned int seed)
+{
+    return (unsigned char)(i * 29 + seed);
+}
+
+static void receive(unsigned int size, unsigned int seed)
+{
+    /* Deliberately unaligned input; the SDK frame owns bytes, not shorts. */
+    unsigned char *allocation = malloc(size + 1);
+    assert(allocation != NULL);
+    for (unsigned int i = 0; i < size; ++i)
+        allocation[i + 1] = input_byte(i, seed);
+    MEDIA_AUDIO_FRAME_T frame = {0};
+    frame.p_audio_buf = allocation + 1;
+    frame.buf_len = size;
+    frame.audio_codec = TUYA_CODEC_AUDIO_G711U;
+    frame.audio_sample = TUYA_AUDIO_SAMPLE_8K;
+    frame.audio_databits = TUYA_AUDIO_DATABITS_16;
+    frame.audio_channel = TUYA_AUDIO_CHANNEL_MONO;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    for (unsigned int i = 0; i < size; ++i)
+        assert(allocation[i + 1] == input_byte(i, seed));
+    free(allocation);
+}
+
+static void expect_output(size_t offset, unsigned int size, unsigned int seed)
+{
+    assert(queued_size >= offset + size * 2);
+    for (unsigned int i = 0; i < size; ++i)
+    {
+        unsigned char expected = input_byte(i, seed) ^ 0x55;
+        assert(queued[offset + i * 2] == expected);
+        assert(queued[offset + i * 2 + 1] == expected);
+    }
+}
+
+static void varying_frames(void)
+{
+    receive(320, 1);
+    receive(160, 2);
+    receive(320, 3);
+    assert(queued_size == 1600);
+    expect_output(0, 320, 1);
+    expect_output(640, 160, 2);
+    expect_output(960, 320, 3);
+}
+
+static void small_first_frame(void)
+{
+    receive(160, 4);
+    receive(320, 5);
+    assert(queued_size == 960);
+    expect_output(0, 160, 4);
+    expect_output(320, 320, 5);
+}
+
+static void large_frames(void)
+{
+    receive(4097, 6);
+    assert(queued_size == 8194);
+    expect_output(0, 4097, 6);
+    receive(641, 7);
+    assert(queued_size == 9476);
+    expect_output(8194, 641, 7);
+}
+
+static void immediate_output(void)
+{
+    const unsigned int sizes[] = {1, 159, 160, 161, 319, 320, 321, 639, 640, 641};
+    for (unsigned int i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i)
+    {
+        size_t offset = queued_size;
+        receive(sizes[i], i);
+        assert(queued_size == offset + sizes[i] * 2);
+        expect_output(offset, sizes[i], i);
+    }
+}
+
+static void invalid_and_monitoring(void)
+{
+    MEDIA_AUDIO_FRAME_T frame = {0};
+    TUYA_IPC_APP_rev_audio_cb(0, 0, NULL);
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    frame.buf_len = 160;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    receive(0, 0);
+    monitoring = true;
+    receive(320, 8);
+    assert(decode_calls == 0 && encode_calls == 0 && queue_calls == 0);
+    monitoring = false;
+    receive(160, 9);
+    assert(queued_size == 320);
+    expect_output(0, 160, 9);
+}
+
+static void decoder_failures(void)
+{
+    for (decode_fault = CODEC_ERROR; decode_fault <= CODEC_LONG; ++decode_fault)
+    {
+        receive(160, 10);
+        assert(encode_calls == 0 && queue_calls == 0);
+    }
+    decode_fault = CODEC_OK;
+    receive(160, 11);
+    assert(queued_size == 320);
+    expect_output(0, 160, 11);
+}
+
+static void encoder_failures(void)
+{
+    for (encode_fault = CODEC_ERROR; encode_fault <= CODEC_LONG; ++encode_fault)
+    {
+        receive(160, 12);
+        assert(queue_calls == 0);
+    }
+    encode_fault = CODEC_OK;
+    receive(160, 13);
+    assert(queued_size == 320);
+    expect_output(0, 160, 13);
+}
+
+static void queue_failure(void)
+{
+    reject_queue = true;
+    receive(4097, 14);
+    assert(queue_calls == 1 && queued_size == 0);
+    reject_queue = false;
+    receive(160, 15);
+    assert(queued_size == 320);
+    expect_output(0, 160, 15);
+}
+
+static void codec_metadata(void)
+{
+    unsigned char input[641];
+    for (unsigned int i = 0; i < sizeof(input); ++i) input[i] = input_byte(i, 25);
+    MEDIA_AUDIO_FRAME_T frame = {0};
+    frame.p_audio_buf = input;
+    frame.buf_len = sizeof(input);
+    frame.audio_sample = TUYA_AUDIO_SAMPLE_16K;
+    frame.audio_channel = TUYA_AUDIO_CHANNEL_MONO;
+    frame.audio_databits = TUYA_AUDIO_DATABITS_16;
+    const int codecs[] = {TUYA_CODEC_AUDIO_G711U, TUYA_CODEC_AUDIO_G711A};
+    for (unsigned int c = 0; c < 2; ++c)
+    {
+        queued_size = 0;
+        frame.audio_codec = codecs[c];
+        TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+        assert(queued_size == sizeof(input));
+        for (unsigned int i = 0; i < sizeof(input); ++i) assert(queued[i] == (input[i] ^ 0x55));
+    }
+    short pcm[321];
+    for (unsigned int i = 0; i < 321; ++i) pcm[i] = (short)(input[i] * 17 - 2048);
+    unsigned char unaligned[sizeof(pcm) + 1];
+    memcpy(unaligned + 1, pcm, sizeof(pcm));
+    frame.audio_codec = TUYA_CODEC_AUDIO_PCM;
+    frame.p_audio_buf = unaligned + 1;
+    frame.buf_len = sizeof(pcm);
+    queued_size = 0;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 321);
+    for (unsigned int i = 0; i < 321; ++i) assert(queued[i] == (input[i] ^ 0x55));
+    frame.audio_sample = TUYA_AUDIO_SAMPLE_8K;
+    queued_size = 0;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 642);
+    for (unsigned int i = 0; i < 321; ++i) assert(queued[i * 2] == (input[i] ^ 0x55) && queued[i * 2 + 1] == queued[i * 2]);
+    frame.buf_len = sizeof(pcm) - 1;
+    queued_size = 0;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 0);
+    frame.buf_len = sizeof(pcm);
+    frame.audio_sample = TUYA_AUDIO_SAMPLE_48K;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 0);
+    frame.audio_sample = TUYA_AUDIO_SAMPLE_16K;
+    frame.audio_codec = TUYA_CODEC_AUDIO_AAC_RAW;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 0);
+    frame.audio_codec = TUYA_CODEC_AUDIO_PCM;
+    frame.audio_channel = TUYA_AUDIO_CHANNEL_STERO;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 0);
+    frame.audio_channel = TUYA_AUDIO_CHANNEL_MONO;
+    frame.audio_databits = TUYA_AUDIO_DATABITS_8;
+    TUYA_IPC_APP_rev_audio_cb(0, 0, &frame);
+    assert(queued_size == 0);
+}
+
+int main(void)
+{
+    struct { const char *name; void (*run)(void); } cases[] = {
+        {"320/160/320-byte frames", varying_frames},
+        {"160/320-byte frames", small_first_frame},
+        {"large frames", large_frames},
+        {"immediate output and chunk boundaries", immediate_output},
+        {"null/empty input and monitor mode", invalid_and_monitoring},
+        {"decoder failures", decoder_failures},
+        {"encoder failures", encoder_failures},
+        {"queue failure", queue_failure},
+        {"PCM/G711 codec and sample metadata", codec_metadata},
+    };
+    unsigned int failures = 0;
+    for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+    {
+        pid_t pid = fork();
+        assert(pid >= 0);
+        if (pid == 0)
+        {
+            cases[i].run();
+            exit(0);
+        }
+        int status;
+        assert(waitpid(pid, &status, 0) == pid);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        {
+            fprintf(stderr, "FAIL: audio receive: %s\n", cases[i].name);
+            ++failures;
+        }
+    }
+    assert(failures == 0);
+    puts("PASS: audio receive preserves complete 16 kHz G711A output and handles invalid input/errors");
+    return 0;
+}

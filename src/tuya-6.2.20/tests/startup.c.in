@@ -1,0 +1,84 @@
+#include <assert.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdatomic.h>
+#include "tuya_sdk.h"
+#include "ty_sdk_common.h"
+
+RING_BUFFER_USER_HANDLE_T s_ring_buffer_handles[E_IPC_STREAM_MAX];
+
+/* SDK_CONTEXT */
+
+static int create_result;
+static int storage_calls;
+static int sdk_result = -1;
+static int storage_result;
+static bool online;
+static tuya_api_weather tuya_api_werather_const;
+struct ak_timeval { long sec; };
+static void ak_get_ostime(struct ak_timeval *tv) { tv->sec = 0; }
+static int tuya_network_online_check(const char *dev) { return 0x02; }
+static int test_ty_sdk_main(const tuya_init_config_t *cfg) { return sdk_result; }
+static int test_tuya_stream_storage_init(void) { ++storage_calls; return storage_result; }
+bool tuya_online_status_get(void) { return online; }
+static int _tuya_api_weather_get(tuya_api_weather *weather) { return 0; }
+static void _cloud_storage_stop_wait(void) {}
+static void tuya_client_num_reset(void) {}
+int tuya_ipc_get_client_online_num(void) { return 0; }
+int tuya_client_num_get(void) { return 0; }
+tuya_api_weather *tuya_weather_get(void) { return &tuya_api_werather_const; }
+void get_network_time(void) {}
+void tuya_outdoor_upgrade_tick(void) {}
+bool tuya_monitor_quit_event(void) { return true; }
+unsigned int sleep(unsigned int seconds) { return 0; }
+int usleep(unsigned int usec) { tuya_ctx.runing = 0; return 0; }
+static int test_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                               void *(*entry)(void *), void *arg)
+{
+    return create_result;
+}
+#define pthread_create test_pthread_create
+
+#define ty_sdk_main test_ty_sdk_main
+#define tuya_stream_storage_init test_tuya_stream_storage_init
+/* SDK_STARTUP */
+
+int main(void)
+{
+    tuya_init_config_t cfg = {0};
+    create_result = EAGAIN;
+    assert(tuya_sdk_init(&cfg) == -1);
+    assert(tuya_ctx.runing == 0);
+    assert(tuya_sdk_init(NULL) == -1);
+    create_result = 0;
+    assert(tuya_sdk_init(&cfg) == 0);
+    assert(tuya_sdk_init(&cfg) == -1);
+    tuya_sdk_thread(&tuya_ctx);
+    assert(tuya_ctx.runing == 0);
+    assert(storage_calls == 0);
+    assert(tuya_sdk_is_ready() == false);
+    sdk_result = 0;
+    tuya_ctx.runing = 1;
+    tuya_sdk_thread(&tuya_ctx);
+    assert(tuya_sdk_is_ready() == false);
+    assert(storage_calls == 0);
+    s_ring_buffer_handles[E_IPC_STREAM_VIDEO_MAIN] = (RING_BUFFER_USER_HANDLE_T)1;
+    s_ring_buffer_handles[E_IPC_STREAM_VIDEO_SUB] = (RING_BUFFER_USER_HANDLE_T)2;
+    s_ring_buffer_handles[E_IPC_STREAM_AUDIO_MAIN] = (RING_BUFFER_USER_HANDLE_T)3;
+    storage_result = -1;
+    tuya_ctx.runing = 1;
+    tuya_sdk_thread(&tuya_ctx);
+    assert(tuya_sdk_is_ready() == false);
+    assert(tuya_ctx.runing == 0 && storage_calls == 1);
+    storage_result = 0;
+    online = true;
+    tuya_ctx.runing = 1;
+    tuya_sdk_thread(&tuya_ctx);
+    assert(tuya_sdk_is_ready() == true && storage_calls == 2);
+    online = false;
+    assert(tuya_online_status_get() == false && tuya_sdk_is_ready() == true);
+    puts("PASS: SDK readiness requires initialized streams/storage and survives MQTT offline");
+    return 0;
+}

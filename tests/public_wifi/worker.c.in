@@ -1,0 +1,82 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+enum { WIFI_CONNECTION_CHECK_IDLE, WIFI_CONNECTION_CHECK_RUNNING, WIFI_CONNECTION_CHECK_SUCCESS, WIFI_CONNECTION_CHECK_FAIL };
+typedef pthread_t ak_pthread_t;
+#define ANYKA_THREAD_NORMAL_STACK_SIZE 102400
+#define WPA_SUPPLICANT_PATH "saved.conf"
+static int fail_thread, status_reads, success_after, cancel_after, sleeps, commits, restores, setup, fail_commit;
+static void *(*queued_worker)(void *);
+static void *queued_arg;
+static char captured[1024];
+void wifi_connection_check_cancel(void);
+static void clear_linked_wifi_info(void) {}
+static int ak_thread_create(ak_pthread_t *thread, void *(*worker)(void *), void *arg, int stack, int priority) {
+    if (fail_thread) return -1;
+    queued_worker = worker; queued_arg = arg; *thread = 1; return 0;
+}
+static int ak_thread_detach(ak_pthread_t thread) { return 0; }
+static void ak_thread_exit(void) {}
+static void ak_sleep_ms(int ms) { if (ms == 500 && ++sleeps == cancel_after) wifi_connection_check_cancel(); }
+static int fake_access(const char *path, int mode) { return !strcmp(path, "/var/run/wpa_supplicant/wlan0") ? 0 : access(path, mode); }
+static FILE *fake_popen(const char *cmd, const char *mode) {
+    assert(setup && "must stop the previous network before checking association");
+    FILE *fp = tmpfile(); assert(fp);
+    status_reads++;
+    fputs(status_reads >= success_after && success_after > 0 ? "wpa_state=COMPLETED\n" : "wpa_state=SCANNING\n", fp);
+    rewind(fp); return fp;
+}
+static int fake_pclose(FILE *fp) { return fclose(fp); }
+static int fake_system(const char *cmd) {
+    if (strstr(cmd, "wpa_supplicant -Dnl80211") && strstr(cmd, "saved.conf")) restores++;
+    else if (strstr(cmd, "wpa_supplicant -Dnl80211")) setup++;
+    if (strstr(cmd, "cp ") || strstr(cmd, "cp -")) { commits++; return fail_commit ? -1 : 0; }
+    return 0;
+}
+#define access fake_access
+#define popen fake_popen
+#define pclose fake_pclose
+#define system fake_system
+@PRODUCTION@
+static void dispatch(void) {
+    void *(*worker)(void *) = queued_worker;
+    queued_worker = NULL;
+    assert(worker); worker(queued_arg);
+}
+static void candidate(void) {
+    char ssid[] = "new-network", password[] = "test-secret";
+    wpa_cli_connect_new_wifi(ssid, password);
+    assert(wifi_connection_check_start());
+    memset(ssid, 'x', strlen(ssid)); memset(password, 'x', strlen(password));
+}
+int main(void) {
+    success_after = 2;
+    candidate();
+    assert(wifi_connection_check_state() == WIFI_CONNECTION_CHECK_RUNNING && !status_reads && !commits);
+    assert(!wifi_connection_check_start());
+    dispatch();
+    assert(wifi_connection_check_state() == WIFI_CONNECTION_CHECK_SUCCESS && commits == 1 && !restores);
+    FILE *fp = fopen("/tmp/wpa_supplicant.conf", "r"); assert(fp);
+    assert(fread(captured, 1, sizeof(captured) - 1, fp) > 0); fclose(fp);
+    assert(strstr(captured, "new-network") && strstr(captured, "test-secret"));
+    success_after = 0; status_reads = sleeps = 0;
+    candidate(); dispatch();
+    assert(wifi_connection_check_state() == WIFI_CONNECTION_CHECK_FAIL && status_reads == 30 && restores == 1 && commits == 1);
+    candidate(); wifi_connection_check_cancel(); dispatch();
+    assert(wifi_connection_check_state() == WIFI_CONNECTION_CHECK_IDLE && commits == 1 && restores == 1);
+    status_reads = sleeps = 0; cancel_after = 1;
+    candidate(); dispatch();
+    assert(wifi_connection_check_state() == WIFI_CONNECTION_CHECK_IDLE && commits == 1 && restores == 2);
+    cancel_after = 0; success_after = 1; fail_commit = 1;
+    candidate(); dispatch();
+    assert(wifi_connection_check_state() == WIFI_CONNECTION_CHECK_FAIL && restores == 3);
+    fail_thread = 1;
+    wpa_cli_connect_new_wifi("retry", "test-secret");
+    assert(!wifi_connection_check_start() && wifi_connection_check_state() == WIFI_CONNECTION_CHECK_FAIL);
+    assert(!queued_worker);
+    return 0;
+}

@@ -1,0 +1,52 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+typedef struct _lv_task_t { void *user_data; } lv_task_t;
+typedef int lv_obj_t;
+typedef struct { void *ta; } lv_keyboard_ext_t;
+enum { WIFI_CONNECTION_CHECK_IDLE, WIFI_CONNECTION_CHECK_RUNNING, WIFI_CONNECTION_CHECK_SUCCESS, WIFI_CONNECTION_CHECK_FAIL };
+enum { CONNECTING, CONNECT_SUCCESS, CONNECT_FAIL };
+static struct { struct { bool wifi_connect_flag; } wifi; } user;
+#define user_data_get() (&user)
+#define Debug(...) ((void)0)
+#define pLAYOUT(x) NULL
+#define WPA_SUPPLICANT_PATH "saved.conf"
+static int task_timer, state, saves, navigated, last_message, cancels, refreshes, deleted;
+static bool connect_falge;
+static lv_obj_t message, *msg;
+static lv_keyboard_ext_t keyboard;
+static int __attribute__((unused)) wifi_connection_check_state(void) { return state; }
+static void __attribute__((unused)) wifi_connection_check_cancel(void) { cancels++; state = WIFI_CONNECTION_CHECK_IDLE; }
+static void user_data_save(void) { saves++; }
+static void __attribute__((unused)) wifi_link_info_refresh(void) { refreshes++; }
+static void goto_layout(void *layout) { navigated++; assert(!connect_falge); }
+static lv_obj_t *connect_wifi_cb(void) { return &message; }
+static void set_msg_text(lv_obj_t *obj, int value) { last_message = value; }
+static void __attribute__((unused)) lv_obj_del(void *obj) { assert(obj == &message); deleted++; }
+static __attribute__((unused)) lv_keyboard_ext_t *lv_obj_get_ext_attr(void *obj) { return &keyboard; }
+static void __attribute__((unused)) lv_textarea_set_text(void *obj, const char *s) {}
+/* A status command on the LVGL thread is the old blocking behavior. */
+static int __attribute__((unused)) wifi_connection_status_sucess(void) { assert(!"blocking Wi-Fi check on UI thread"); return 0; }
+static int __attribute__((unused)) fake_system(const char *cmd) { assert(!"network process operation on UI thread"); return 0; }
+#define system fake_system
+@PRODUCTION@
+int main(void) {
+    lv_task_t task = { &keyboard };
+    msg = &message;
+    connect_falge = true; state = WIFI_CONNECTION_CHECK_RUNNING;
+    for (int tick = 0; tick < 14; tick++) msg_task(&task);
+    assert(connect_falge && !saves);
+    state = WIFI_CONNECTION_CHECK_SUCCESS;
+    msg_task(&task);
+    assert(!connect_falge && saves == 1 && navigated == 1 && last_message == CONNECT_SUCCESS);
+    assert(user.wifi.wifi_connect_flag && refreshes == 1 && cancels == 0);
+    connect_falge = true; state = WIFI_CONNECTION_CHECK_RUNNING; task_timer = 0;
+    for (int tick = 0; tick < 31; tick++) msg_task(&task);
+    assert(!connect_falge && cancels == 1 && last_message == CONNECT_FAIL);
+    assert(deleted == EXPECT_FAILURE_DELETE);
+    connect_falge = true; state = WIFI_CONNECTION_CHECK_FAIL; task_timer = 0;
+    msg_task(&task);
+    assert(!connect_falge && cancels == 2 && last_message == CONNECT_FAIL);
+    return 0;
+}

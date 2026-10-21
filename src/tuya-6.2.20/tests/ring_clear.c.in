@@ -1,0 +1,30 @@
+#include <assert.h>
+#include "ty_sdk_common.h"
+
+RING_BUFFER_USER_HANDLE_T s_ring_buffer_handles[E_IPC_STREAM_MAX];
+static int clean_calls;
+static int frame_calls;
+VOID tuya_ipc_ring_buffer_clean_user_state_and_buffer(RING_BUFFER_USER_HANDLE_T handle)
+{
+    assert(handle != NULL);
+    ++clean_calls;
+}
+RING_BUFFER_NODE_T *tuya_ipc_ring_buffer_get_frame(RING_BUFFER_USER_HANDLE_T handle, BOOL_T retry)
+{
+    assert(handle != NULL);
+    ++frame_calls;
+    return NULL;
+}
+
+/* SDK_RING_CLEAR */
+
+int main(void)
+{
+    tuya_ring_buffer_clear();
+    assert(clean_calls == 0 && frame_calls == 0);
+    s_ring_buffer_handles[E_IPC_STREAM_VIDEO_MAIN] = (RING_BUFFER_USER_HANDLE_T)1;
+    tuya_ring_buffer_clear();
+    assert(clean_calls == 1 && frame_calls == 1);
+    puts("PASS: ring clearing tolerates uninitialized streams");
+    return 0;
+}

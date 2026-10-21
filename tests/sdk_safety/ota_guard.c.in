@@ -1,0 +1,137 @@
+#include <assert.h>
+#include <stdio.h>
+
+static bool fail_open, fail_write, fail_flush, fail_close, fail_move, fail_extract, synchronous_finish;
+static int closes, system_calls, watchdog_calls, outdoor_calls, sdk_calls;
+static int sdk_result, report_type;
+static char install_command[512];
+static FILE *test_fopen(const char *path, const char *mode) { return fail_open ? NULL : tmpfile(); }
+static size_t test_fwrite(const void *p, size_t size, size_t count, FILE *f) {
+    return fail_write ? 0 : fwrite(p, size, count, f);
+}
+static int test_fflush(FILE *f) { return fail_flush ? EOF : fflush(f); }
+static int test_fclose(FILE *f) { ++closes; int ret = fclose(f); return fail_close ? EOF : ret; }
+static int test_rename(const char *src, const char *dst) {
+    assert(strcmp(src, "/tmp/TWO_WIRE_APP") == 0 && strcmp(dst, "/tmp/cbin.update") == 0);
+    return fail_move ? -1 : 0;
+}
+static int test_unlink(const char *path) { return 0; }
+#define fopen test_fopen
+#define fwrite test_fwrite
+#define fflush test_fflush
+#define fclose test_fclose
+#define rename test_rename
+#define unlink test_unlink
+#include "app/app_user_upgrade/src/ty_sdk_upgrade.c"
+#undef fopen
+#undef fwrite
+#undef fflush
+#undef fclose
+
+static GET_FILE_DATA_CB data_cb;
+static UPGRADE_NOTIFY_CB finish_cb;
+static void *download_context;
+OPERATE_RET tuya_ipc_upgrade_sdk(const FW_UG_S *fw, GET_FILE_DATA_CB data,
+                                 UPGRADE_NOTIFY_CB finish, void *context) {
+    ++sdk_calls; data_cb = data; finish_cb = finish; download_context = context;
+    if (synchronous_finish) finish(fw, -1, context);
+    return sdk_result;
+}
+int system(const char *command) {
+    ++system_calls;
+    if (strstr(command, "/tmp/update.sh")) snprintf(install_command, sizeof(install_command), "%s", command);
+    return fail_extract && strstr(command, "tar -") ? 1 : 0;
+}
+int ak_drv_wdt_close(void) { ++watchdog_calls; return 0; }
+bool tuya_ota_upgrade_event(void) { ++outdoor_calls; return true; }
+OPERATE_RET tuya_ipc_upgrade_progress_report_by_type(UINT_T percent, BYTE_T type) {
+    report_type = type;
+    return OPRT_OK;
+}
+static FW_UG_S firmware(void) {
+    FW_UG_S fw = {0}; fw.tp = DEV_NM_ATH_SNGL; fw.file_size = 4;
+    snprintf(fw.fw_url, sizeof(fw.fw_url), "https://example.invalid/SAT_ANYKAOS_123.tar.gz");
+    return fw;
+}
+static int write_data(FW_UG_S *fw) {
+    BYTE_T data[4] = {1,2,3,4}; UINT_T remain = 999;
+    return data_cb(fw, sizeof(data), 0, data, sizeof(data), &remain, download_context);
+}
+static void assert_not_installed(void) {
+    assert(system_calls == 0 && watchdog_calls == 0 && outdoor_calls == 0);
+}
+int main(void) {
+    FW_UG_S fw = firmware();
+    fail_open = true;
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) != OPRT_OK && sdk_calls == 0);
+    fail_open = false;
+    sdk_result = -1;
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) != OPRT_OK && closes == 1);
+    synchronous_finish = true;
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) != OPRT_OK && closes == 2);
+    synchronous_finish = false;
+    sdk_result = 0;
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(finish_cb(&fw, -1, download_context) != OPRT_OK);
+    assert_not_installed();
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    fail_write = true;
+    assert(write_data(&fw) != OPRT_OK);
+    fail_write = false;
+    assert(finish_cb(&fw, OPRT_OK, download_context) != OPRT_OK);
+    assert_not_installed();
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    fail_flush = true;
+    assert(write_data(&fw) != OPRT_OK);
+    fail_flush = false;
+    assert(finish_cb(&fw, OPRT_OK, download_context) != OPRT_OK);
+    assert_not_installed();
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    fail_close = true;
+    assert(finish_cb(&fw, OPRT_OK, download_context) != OPRT_OK);
+    fail_close = false;
+    assert_not_installed();
+    /* A successful network result does not make a truncated file installable. */
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(finish_cb(&fw, OPRT_OK, download_context) != OPRT_OK);
+    assert_not_installed();
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    fail_extract = true;
+    assert(finish_cb(&fw, OPRT_OK, download_context) != OPRT_OK);
+    fail_extract = false;
+    assert(watchdog_calls == 0 && outdoor_calls == 0);
+    system_calls = 0;
+    fw.tp = DEV_NM_ATH_SNGL + 1;
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    assert(report_type == fw.tp);
+    fail_move = true;
+    assert(finish_cb(&fw, OPRT_OK, download_context) != OPRT_OK);
+    fail_move = false;
+    assert_not_installed();
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    assert(finish_cb(&fw, OPRT_OK, download_context) == OPRT_OK);
+    assert(outdoor_calls == 1 && watchdog_calls == 0);
+    fw.tp = DEV_NM_ATH_SNGL;
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    assert(finish_cb(&fw, OPRT_OK, download_context) == OPRT_OK);
+    assert(watchdog_calls == 1);
+    assert(strstr(install_command, "/tmp/update.sh SAT_ANYKAOS_123 &") != NULL);
+    snprintf(fw.fw_url, sizeof(fw.fw_url), "https://example.invalid/SAT_ANYKAOS_123;touch-malicious");
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    assert(finish_cb(&fw, OPRT_OK, download_context) == OPRT_OK);
+    assert(strstr(install_command, "/tmp/update.sh SAT_ANYKAOS_123 &") != NULL);
+    assert(strstr(install_command, "touch-malicious") == NULL);
+    snprintf(fw.fw_url, sizeof(fw.fw_url), "https://example.invalid/firmware.bin");
+    assert(TUYA_IPC_Upgrade_Inform_cb(&fw) == OPRT_OK);
+    assert(write_data(&fw) == OPRT_OK);
+    assert(finish_cb(&fw, OPRT_OK, download_context) == OPRT_OK);
+    assert(strstr(install_command, "/tmp/update.sh SAT_ANYKAOS_UNKNOWN &") != NULL);
+    puts("PASS: OTA open/write/flush/close/download/start/install failures and indoor/outdoor handoff");
+    return 0;
+}

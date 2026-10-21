@@ -1,0 +1,70 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
+#define WPA_SUPPLICANT_PATH "saved.conf"
+static struct { int completed; char ssid[32]; } wifi_wlan0 = {1, "old"};
+static bool wlan_turn_on = true;
+static int disconnected, disabled;
+static bool fail_sync;
+static int fake_fsync(int fd) { return fail_sync ? -1 : fsync(fd); }
+static void wifi_connection_check_cancel(void) {}
+static int fake_system(const char *cmd) {
+    if (strstr(cmd, "disconnect")) disconnected++;
+    if (strstr(cmd, "disable_network all")) disabled++;
+    return 0;
+}
+static FILE *fake_popen(const char *cmd, const char *mode) { FILE *fp = tmpfile(); assert(fp); fputs("0\n1\n", fp); rewind(fp); return fp; }
+#define system fake_system
+#define popen fake_popen
+#define pclose fclose
+#define fsync fake_fsync
+@PRODUCTION@
+int main(void) {
+    FILE *fp = fopen(WPA_SUPPLICANT_PATH, "w"); assert(fp);
+    fputs("ctrl_interface=/var/run/wpa_supplicant\nnetwork={\n\tssid=\"disabled=guest\"\n\tpsk=\"secret-disabled=value\"\n\t# disabled=0 must remain a comment\n}\n  network = { # second\n\tssid=\"second}network={\"\n\t disabled = 0 # preserve comment\n  } # preserve closing comment\n", fp); fclose(fp);
+    turn_off_wlan_break();
+    assert(!wlan_turn_on && !wifi_wlan0.completed && !wifi_wlan0.ssid[0] && disabled == 1 && disconnected == 1);
+    char content[1024] = {0}; fp = fopen(WPA_SUPPLICANT_PATH, "r"); assert(fp);
+    assert(fread(content, 1, sizeof(content) - 1, fp) > 0); fclose(fp);
+    assert(strstr(content, "ssid=\"disabled=guest\""));
+    assert(strstr(content, "psk=\"secret-disabled=value\""));
+    assert(strstr(content, "# disabled=0 must remain a comment"));
+    assert(strstr(content, "ssid=\"second}network={\""));
+    assert(strstr(content, "\t disabled = 1 # preserve comment"));
+    assert(strstr(content, "  } # preserve closing comment"));
+    assert(strstr(content, "\tdisabled=1\n"));
+
+    /* Verification must inspect actual keys within every complete network block. */
+    fp = tmpfile(); assert(fp);
+    fputs("# disabled=1\nnetwork={\nssid=\"disabled=1\"\n}\n", fp); rewind(fp);
+    assert(!wlan_config_all_networks_disabled(fp)); fclose(fp);
+    fp = tmpfile(); assert(fp);
+    fputs("network={\ndisabled=10\n}\n", fp); rewind(fp);
+    assert(!wlan_config_all_networks_disabled(fp)); fclose(fp);
+    fp = tmpfile(); assert(fp);
+    fputs("network={\ndisabled = 1 # disabled\n}\nnetwork={\nssid=\"missing\"\n}\n", fp); rewind(fp);
+    assert(!wlan_config_all_networks_disabled(fp)); fclose(fp);
+    fp = tmpfile(); assert(fp);
+    fputs("  network = {\n\tdisabled = 1 # disabled\n  }\n", fp); rewind(fp);
+    assert(wlan_config_all_networks_disabled(fp)); fclose(fp);
+
+    /* Partial writes or malformed blocks must never replace the saved config. */
+    const char *original = "network={\n\tssid=\"saved\"\n\tdisabled=0\n}\n";
+    fp = fopen(WPA_SUPPLICANT_PATH, "w"); assert(fp); fputs(original, fp); fclose(fp);
+    fail_sync = true;
+    assert(!disable_wlan_networks_in_config());
+    memset(content, 0, sizeof(content)); fp = fopen(WPA_SUPPLICANT_PATH, "r"); assert(fp);
+    assert(fread(content, 1, sizeof(content) - 1, fp) > 0); fclose(fp);
+    assert(!strcmp(content, original));
+    fail_sync = false;
+    original = "network={\n\tssid=\"unterminated\"\n";
+    fp = fopen(WPA_SUPPLICANT_PATH, "w"); assert(fp); fputs(original, fp); fclose(fp);
+    assert(!disable_wlan_networks_in_config());
+    memset(content, 0, sizeof(content)); fp = fopen(WPA_SUPPLICANT_PATH, "r"); assert(fp);
+    assert(fread(content, 1, sizeof(content) - 1, fp) > 0); fclose(fp);
+    assert(!strcmp(content, original));
+    return 0;
+}

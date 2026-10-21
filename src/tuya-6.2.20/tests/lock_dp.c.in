@@ -1,0 +1,154 @@
+#include <assert.h>
+#include <stdbool.h>
+bool monitor_valid_channel_check(char channel);
+#include "app/app_main/src/ty_sdk_dp_callback.c"
+
+static int open_count;
+static tuya_event last_event;
+static bool online = true;
+static int report_count;
+static int last_dp;
+static char support[512];
+static bool last_bool;
+static int all_unlock_calls;
+static int light_calls;
+static int workmode_calls;
+static int channel_calls;
+static int screenshot_calls;
+
+bool tuya_monitor_light_event(bool state) { ++light_calls; return true; }
+bool tuya_work_mode_switch_event(unsigned int mode) { ++workmode_calls; return true; }
+bool tuya_monitor_swap_event(int channel) { ++channel_calls; return true; }
+bool tuya_screenshot_event(void) { ++screenshot_calls; return true; }
+bool monitor_valid_channel_check(char channel) { return channel >= 1 && channel <= 4; }
+
+bool tuya_online_status_get(void) { return online; }
+bool tuya_unlock_event(bool state, tuya_event event)
+{
+    ++all_unlock_calls;
+    if (state) { ++open_count; last_event = event; }
+    return true;
+}
+bool tuya_monitor_gate2_event(bool state)
+{
+    return tuya_unlock_event(state, TUYA_EVENT_OPEN_GATE2);
+}
+OPERATE_RET tuya_ipc_dp_report(const CHAR_T *dev_id, BYTE_T dp_id,
+                              DP_PROP_TP_E type, VOID *value, const UINT_T count)
+{
+    ++report_count;
+    last_dp = dp_id;
+    if (type == PROP_BOOL) last_bool = *(BOOL_T *)value;
+    if (type == PROP_STR) snprintf(support, sizeof(support), "%s", (char *)value);
+    return OPRT_OK;
+}
+
+int main(void)
+{
+    TY_OBJ_DP_S dp = {0};
+    /* Wrong-type and query payloads must never become truthy unlock requests. */
+    dp.type = PROP_VALUE;
+    dp.value.dp_value = 1;
+    handle_DP_DOOR_LOCK(&dp);
+    handle_DP_DOOR_LOCK1(&dp);
+    handle_DP_DOOR_LOCK2(&dp);
+    assert(open_count == 0);
+
+    handle_DP_WORK_MODE(NULL);
+    handle_DP_BLUB_SWITCH(NULL);
+    handle_DP_SWITCH_CHANNEL(NULL);
+    handle_DP_DEVICE_SCREENSHOT(NULL);
+    assert(light_calls == 0 && workmode_calls == 0 && channel_calls == 0 && screenshot_calls == 0);
+    dp.type = PROP_VALUE;
+    handle_DP_WORK_MODE(&dp);
+    handle_DP_BLUB_SWITCH(&dp);
+    handle_DP_SWITCH_CHANNEL(&dp);
+    handle_DP_DEVICE_SCREENSHOT(&dp);
+    assert(light_calls == 0 && workmode_calls == 0 && channel_calls == 0 && screenshot_calls == 0);
+    dp.type = PROP_STR;
+    dp.value.dp_str = NULL;
+    handle_DP_SWITCH_CHANNEL(&dp);
+    dp.value.dp_str = "{\"cmd\":1,\"cc\":1}";
+    handle_DP_SWITCH_CHANNEL(&dp);
+    dp.value.dp_str = "{\"cmd\":1,\"cc\":111111111111111111111111111111111111111111,}";
+    handle_DP_SWITCH_CHANNEL(&dp);
+    assert(channel_calls == 0);
+    dp.value.dp_str = "{\"cmd\":1,\"cc\":1,\"chs\":[]}";
+    handle_DP_SWITCH_CHANNEL(&dp);
+    assert(channel_calls == 1);
+    assert(tuya_channel_report(0, NULL, 0) == -1);
+    dp.type = PROP_BOOL;
+    dp.value.dp_bool = TRUE;
+    handle_DP_BLUB_SWITCH(&dp);
+    handle_DP_DEVICE_SCREENSHOT(&dp);
+    dp.type = PROP_ENUM;
+    dp.value.dp_enum = 1;
+    handle_DP_WORK_MODE(&dp);
+    assert(light_calls == 1 && workmode_calls == 1 && screenshot_calls == 1);
+    handle_DP_DOOR_LOCK(NULL);
+    handle_DP_DOOR_LOCK1(NULL);
+    handle_DP_DOOR_LOCK2(NULL);
+    assert(open_count == 0);
+
+    const int ids[] = {148, 232, 233};
+    const tuya_event events[] = {TUYA_EVENT_OPEN_LOCK, TUYA_EVENT_OPEN_GATE1, TUYA_EVENT_OPEN_GATE2};
+    TY_RECV_OBJ_DP_S *request = calloc(1, sizeof(*request) + sizeof(dp));
+    assert(request);
+    request->dps_cnt = 1;
+    for (int i = 0; i < 3; ++i) {
+        dp.dpid = ids[i];
+        dp.type = PROP_BOOL;
+        dp.value.dp_bool = 1;
+        request->dps[0] = dp;
+        TUYA_IPC_handle_dp_cmd_objs(request);
+        assert(open_count == i + 1);
+        assert(last_event == events[i]);
+        dp.value.dp_bool = 0;
+        request->dps[0] = dp;
+        TUYA_IPC_handle_dp_cmd_objs(request);
+        assert(open_count == i + 1);
+        dp.type = PROP_STR;
+        dp.value.dp_str = "true";
+        request->dps[0] = dp;
+        TUYA_IPC_handle_dp_cmd_objs(request);
+        assert(open_count == i + 1);
+        assert(tuya_door_lock_report((tuya_door_lock_t)i, false) == 0);
+        assert(last_dp == ids[i]);
+    }
+    TUYA_IPC_handle_dp_cmd_objs(NULL);
+    request->dps_cnt = 0;
+    TUYA_IPC_handle_dp_cmd_objs(request);
+    free(request);
+    assert(tuya_lock_support_report() == 0);
+    assert(last_dp == 234 && strcmp(support, "148,232") == 0);
+    assert(all_unlock_calls == 6); /* GVS forwards both true and false; queries do not pulse. */
+    TY_DP_QUERY_S *query = calloc(1, sizeof(*query) + 6);
+    assert(query);
+    query->cnt = 6;
+    const unsigned char query_ids[] = {148,232,233,162,234,235};
+    memcpy(query->dpid, query_ids, sizeof(query_ids));
+    int reports_before_query = report_count;
+    TUYA_IPC_handle_dp_query_objs(query);
+    free(query);
+    assert(all_unlock_calls == 6 && report_count == reports_before_query + 2);
+    assert(last_dp == 235 && last_bool == false);
+    tuya_ch_info_t channel_info[] = {{1, "Door \"one\""}, {4, "Camera"}};
+    assert(tuya_channel_report(1, channel_info, 2) == 0);
+    assert(last_dp == 231 && strstr(support, "\"cmd\":1") && strstr(support, "Door \\\"one\\\""));
+    assert(tuya_channel_response(4, channel_info, 2) == 0);
+    assert(strstr(support, "\"res\":1,\"err\":0,\"cc\":4"));
+    char huge_name[600]; memset(huge_name, 'x', sizeof(huge_name)); huge_name[599] = 0;
+    channel_info[0].name = huge_name;
+    int before_overflow = report_count;
+    assert(tuya_channel_report(1, channel_info, 2) == -1 && report_count == before_overflow);
+    dp.type = PROP_STR; dp.value.dp_str = "{\"cmd\":1,\"cc\":257,\"chs\":[]}";
+    handle_DP_SWITCH_CHANNEL(&dp); assert(channel_calls == 1);
+    int before = report_count;
+    assert(tuya_door_lock_report((tuya_door_lock_t)-1, false) == -1);
+    assert(tuya_door_lock_report((tuya_door_lock_t)3, false) == -1);
+    online = false;
+    assert(tuya_door_lock_report(TUYA_DOOR_LOCK1, false) == -1);
+    assert(report_count == before);
+    puts("PASS: GVS lock DP routing, reports and rejected payloads");
+    return 0;
+}

@@ -1,0 +1,42 @@
+#include <assert.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+typedef struct { int obj_id, obj_data; } lv_obj_t;
+typedef struct _lv_task_t { void *user_data; } lv_task_t;
+typedef struct { int offset; } pattern;
+typedef struct { struct { pattern **pattern_p; } btnm; void *ta; } lv_keyboard_ext_t;
+enum { ROM_RES_KB_APPLY_PNG, CONNECTING, CONNECT_SUCCESS, CONNECT_FAIL, WIFIPWD_SHOT, LV_TASK_PRIO_HIGH };
+#define Debug(...) ((void)0)
+#define pLAYOUT(x) NULL
+static __attribute__((unused)) bool accepted, connect_falge, is_wifi_page_move;
+static __attribute__((unused)) int task_timer, last_message, connectwifi_index, attempts;
+static __attribute__((unused)) char addwifi_name[] = "retry", addwifi_pwd[] = "test-secret", connectwifi_name[64] = "retry";
+static __attribute__((unused)) lv_obj_t button = { 1, 1 }, message, *msg;
+static __attribute__((unused)) lv_task_t task, *wifi_link_task, *msg_ui_ptask;
+static __attribute__((unused)) pattern apply = {ROM_RES_KB_APPLY_PNG}, *patterns[] = {&apply};
+static __attribute__((unused)) lv_keyboard_ext_t keyboard = {{patterns}, NULL};
+static __attribute__((unused)) void wpa_cli_connect_new_wifi(char *ssid, char *password) { assert(!strcmp(ssid, "retry")); }
+static __attribute__((unused)) bool wifi_connection_check_start(void) { attempts++; return accepted; }
+static __attribute__((unused)) lv_obj_t *connect_wifi_cb(void) { return &message; }
+static __attribute__((unused)) void set_msg_text(lv_obj_t *object, int value) { assert(object == &message); last_message = value; }
+static __attribute__((unused)) void lv_task_del(lv_task_t *value) {}
+static __attribute__((unused)) void msg_task(struct _lv_task_t *value) {}
+static __attribute__((unused)) lv_task_t *lv_task_create(void (*callback)(struct _lv_task_t *), int period, int priority, void *arg) { return &task; }
+static __attribute__((unused)) void goto_layout(void *layout) {}
+static __attribute__((unused)) const char *lv_textarea_get_text(void *object) { return "test-secret"; }
+static __attribute__((unused)) void lv_textarea_set_text(void *object, const char *value) {}
+static __attribute__((unused)) lv_obj_t *lv_obj_get_child_back(lv_obj_t *object, void *child) { return object; }
+static __attribute__((unused)) const char *lv_label_get_text(lv_obj_t *object) { return "retry"; }
+@PRODUCTION@
+int main(void) {
+    (void)is_wifi_page_move; (void)connectwifi_index; (void)addwifi_name; (void)addwifi_pwd;
+    (void)connectwifi_name; (void)button; (void)msg; (void)wifi_link_task; (void)msg_ui_ptask; (void)keyboard;
+    accepted = false; connect_falge = false; task_timer = 9; last_message = CONNECTING;
+    @INVOKE@
+    assert(attempts == 1 && !connect_falge && task_timer == 0 && last_message == CONNECT_FAIL);
+    accepted = true; connect_falge = false; task_timer = 9;
+    @INVOKE@
+    assert(attempts == 2 && connect_falge && task_timer == 0 && last_message == CONNECTING);
+    return 0;
+}

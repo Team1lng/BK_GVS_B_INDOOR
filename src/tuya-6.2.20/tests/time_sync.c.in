@@ -1,0 +1,48 @@
+#include <assert.h>
+#include "ty_sdk_common.h"
+
+static bool online;
+static int service_result;
+static int local_result;
+static int service_calls;
+static int local_calls;
+bool tuya_online_status_get(void) { return online; }
+OPERATE_RET tuya_ipc_get_service_time(TIME_T *utc, INT_T *zone)
+{
+    ++service_calls;
+    *utc = 1000;
+    *zone = 0;
+    return service_result;
+}
+OPERATE_RET tuya_ipc_get_local_time(TIME_T utc, struct tm *local)
+{
+    ++local_calls;
+    assert(local != NULL);
+    local->tm_year = 126;
+    return local_result;
+}
+
+/* SDK_TIME_SYNC */
+
+int main(void)
+{
+    struct tm value = {0};
+    value.tm_year = 99;
+    assert(tuya_net_time_sync(&value) == false);
+    assert(service_calls == 0 && local_calls == 0 && value.tm_year == 99);
+    online = true;
+    assert(tuya_net_time_sync(NULL) == false);
+    assert(service_calls == 0 && local_calls == 0);
+    service_result = -1;
+    assert(tuya_net_time_sync(&value) == false);
+    assert(service_calls == 1 && local_calls == 0 && value.tm_year == 99);
+    service_result = 0;
+    local_result = -1;
+    assert(tuya_net_time_sync(&value) == false);
+    assert(local_calls == 1 && value.tm_year == 99);
+    local_result = 0;
+    assert(tuya_net_time_sync(&value) == true);
+    assert(value.tm_year == 126);
+    puts("PASS: time sync rejects offline/null/SDK errors and only publishes successful time");
+    return 0;
+}
